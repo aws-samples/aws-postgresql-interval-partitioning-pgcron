@@ -1,0 +1,659 @@
+# Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# https://aws.amazon.com/agreement
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: 2010-09-09
+Description:  This template creates a VPC with 1 public and 2 private subnets. It also creates an EC2 (Bastion Host) and Aurora PostgreSQL Instance.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - pVpcCIDR
+          - pPublicBastionSubnet1CIDR
+          - pPrivateDBSubnet1CIDR
+          - pPrivateDBSubnet2CIDR
+      - Label:
+          default: Bastion Server Configuration
+        Parameters:
+          - pBastionAmiId
+          - pBastionInstanceType
+          - pEC2KeyPair
+          - pEc2InstanceProfile
+      - Label:
+          default: Aurora Postgres Configuration
+        Parameters:
+          - pPGDBName
+          - pPGDBPort
+          - pPGDBAdminUser
+          - pPGDBEngineVersion
+          - pPGDBInstanceClass
+          - pPGDBBackupRetention
+
+    ParameterLabels: 
+      pVpcCIDR: 
+        default: "Enter VPC CIDR"
+      pPublicBastionSubnet1CIDR:
+        default: "Enter Public Bastion Subnet CIDR"
+      pPrivateDBSubnet1CIDR:
+        default: "Enter Private DB Subnet1 CIDR"
+      pPrivateDBSubnet2CIDR:
+        default: "Enter Private DB Subnet2 CIDR"
+      pSourceIp:
+        default: "Please enter the Source IP range (CIDR notation) that will be used to connect to EC2"
+      pEC2KeyPair:
+        default: "Enter the EC2 Key Pair. If you do not have one in this AWS Region, create it before continuing"
+      pBastionAmiId:
+        default: "Enter AMI ID for Bastion Server"
+      pBastionInstanceType:
+        default: "Enter EC2 instance type for Bastion Server"
+      pEc2InstanceProfile:
+        default: "Enter the Name of the EC2 instance profile which has permission to deploy AWS Services"
+      pPGDBName: 
+        default: "Enter Aurora Postgres Database Name"
+      pPGDBPort:
+        default: "Enter TCP/IP Port for the Aurora Postgres Instance"
+      pPGDBAdminUser:
+        default: "Enter Aurora Postgres Database master username"
+      pPGDBEngineVersion:
+        default: "Enter Aurora Postgres Database Engine Version"
+      pPGDBInstanceClass:
+        default: "Enter Aurora Postgres Database Instance Class"
+      pPGDBBackupRetention:
+        default: "Enter Backup Retention for Aurora Postgres Database"
+
+Parameters:
+  pVpcCIDR:
+    Type: String
+    Default: 10.192.0.0/16
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+
+  pPublicBastionSubnet1CIDR:
+    Type: String
+    Default: 10.192.10.0/24
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+
+  pPrivateDBSubnet1CIDR:
+    Type: String
+    Default: 10.192.21.0/24
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+
+  pPrivateDBSubnet2CIDR:
+    Type: String
+    Default: 10.192.22.0/24
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+
+  pSourceIp:
+    Type: String
+    Default: 98.50.105.0/24
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+
+  pEC2KeyPair:
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    AllowedPattern: '^[a-zA-Z]+[0-9a-zA-Z\-]*$'
+
+  pBastionAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+    AllowedPattern: '^[0-9a-zA-Z\-\/_]*$'
+
+  pBastionInstanceType:
+    AllowedValues:
+      - t2.micro
+      - c5.large
+      - m5.large
+    Default: t2.micro
+    Type: String
+
+  pEc2InstanceProfile:
+    Type: String
+
+  pPGDBName:
+    Type: String
+    Default: 'demopg'
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: "^[a-zA-Z]+[0-9a-zA-Z_]*$" 
+    ConstraintDescription: Must start with a letter. Only numbers, letters, and _ accepted. max length 64 characters 
+
+  pPGDBPort:
+    Type: Number
+    Default: 5432
+    ConstraintDescription: 'Must be in the range [1115-65535]'
+    MinValue: 1115
+    MaxValue: 65535
+    
+  pPGDBAdminUser:
+    Type: String
+    Default: rdspgdba
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: "^[a-zA-Z]+[0-9a-zA-Z_]*$"
+    ConstraintDescription: Must start with a letter. Only numbers, letters, and _ accepted. max length 16 characters
+     
+  pPGDBEngineVersion:
+    Type: String
+    Default: 15.4
+    AllowedValues:
+    - 12.8
+    - 12.9
+    - 12.10
+    - 13.4
+    - 13.5
+    - 13.6
+    - 14.3
+    - 14.4
+    - 14.9
+    - 15.4
+
+  pPGDBInstanceClass:
+    Type: String
+    Default: db.t4g.large
+    AllowedValues:
+    - db.t4g.large
+    - db.r5.large
+    - db.r5.xlarge
+    
+  pPGDBBackupRetention:
+    Type: Number
+    Default: 1
+    ConstraintDescription: 'Must be in the range [1-35]'
+    MinValue: 1
+    MaxValue: 35
+
+  pS3CodeLocation:
+    Type: String
+    Default: "s3://bucket-name/aws-postgresql-interval-partitioning-pg_cron.zip"
+  
+Mappings: 
+  mDBFamily: 
+    "12.8":
+      "family": "aurora-postgresql12"
+    "12.9":
+      "family": "aurora-postgresql12"
+    "12.10":
+      "family": "aurora-postgresql12"
+    "13.4":
+      "family": "aurora-postgresql13"
+    "13.5":
+      "family": "aurora-postgresql13"
+    "13.6":
+      "family": "aurora-postgresql13"
+    "14.3":
+      "family": "aurora-postgresql14"
+    "14.4":
+      "family": "aurora-postgresql14"
+    "14.9":
+      "family": "aurora-postgresql14"
+    "15.4":
+      "family": "aurora-postgresql15"
+Resources:
+  rVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref pVpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-VPC
+
+  rInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-IGW
+
+  rInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref rInternetGateway
+      VpcId: !Ref rVPC
+
+  rPublicBastionSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref rVPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref pPublicBastionSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName} Public Bastion Subnet (AZ1)
+
+  rPrivateDBSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref rVPC
+      AvailabilityZone: !Select [ 0, !GetAZs  '' ]
+      CidrBlock: !Ref pPrivateDBSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName} Private DB Subnet (AZ1)
+
+  rPrivateDBSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref rVPC
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: !Ref pPrivateDBSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName} Private DB Subnet (AZ2)
+
+  rNatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: rInternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-NatGatewayEIP
+
+  rNatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt rNatGateway1EIP.AllocationId
+      SubnetId: !Ref rPublicBastionSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-NatGateway
+
+  rPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref rVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName} Public Routes
+
+  rDefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: rInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref rPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref rInternetGateway
+
+  rPublicBastionSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref rPublicRouteTable
+      SubnetId: !Ref rPublicBastionSubnet1
+
+  rPrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref rVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName} Private Routes (AZ1)
+
+  rDefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref rPrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref rNatGateway1
+
+  rPrivateDBSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref rPrivateRouteTable1
+      SubnetId: !Ref rPrivateDBSubnet1
+
+  rPrivateDBSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref rPrivateRouteTable1
+      SubnetId: !Ref rPrivateDBSubnet2
+
+  rBastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref rVPC
+      GroupDescription: "Control access to the Bastion Server"
+      SecurityGroupIngress: 
+        - Description: "Allow SSH Traffic from Internet"
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref pSourceIp
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+          Description: Allow all outgoing connections
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Bastion SecurityGroup
+
+  rDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref rVPC
+      GroupDescription: "Control access to the DB Instance"
+      SecurityGroupIngress: 
+        - Description: "Allow Connection to Postgres Instance from Bastion Server"
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !GetAtt rBastionSecurityGroup.GroupId
+        - Description: "Allow Connection to Postgres Instance from PrivateDBSubnet1"
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref pPrivateDBSubnet1CIDR
+        - Description: "Allow Connection to Postgres Instance from PrivateDBSubnet2"
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref pPrivateDBSubnet2CIDR
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+          Description: Allow all outgoing connections
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DB SecurityGroup
+
+  rPGSelfSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: 'Self Reference'
+      GroupId: !Ref rDBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt rDBSecurityGroup.GroupId
+      
+  rDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "DB Subnet group for RDS Instances"
+      DBSubnetGroupName: rds-subnet-group
+      SubnetIds:
+        - !Ref rPrivateDBSubnet1
+        - !Ref rPrivateDBSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName} DB Subnet Group
+
+  rVPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:  "Security group for VPC Endpoints"
+      VpcId: !Ref rVPC
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+          Description: Allow all outgoing connections
+      Tags:
+      - Key: Name
+        Value: !Sub '${AWS::StackName}-VPCEndpointSecurityGroup'
+
+  rVPCEndpointSecurityGroupIngress:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref rVPCEndpointSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt 'rVPCEndpointSecurityGroup.GroupId'
+      Description: 'Self Reference'
+
+  rSecretsManagerVPCEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      VpcEndpointType: 'Interface'
+      PrivateDnsEnabled: true
+      VpcId: !Ref rVPC
+      SubnetIds: 
+        - !Ref rPrivateDBSubnet1
+        - !Ref rPrivateDBSubnet2
+      SecurityGroupIds: 
+        - !Ref rVPCEndpointSecurityGroup
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+
+  rBastionServer:
+    Type: AWS::EC2::Instance
+    DependsOn: 
+      - rAuroraPGInstance1
+    Properties:
+      InstanceType: !Ref pBastionInstanceType
+      ImageId: !Ref pBastionAmiId
+      KeyName: !Ref pEC2KeyPair
+      SubnetId: !Ref rPublicBastionSubnet1
+      SecurityGroupIds: 
+        - !Ref rBastionSecurityGroup
+        - !Ref rVPCEndpointSecurityGroup
+      BlockDeviceMappings: 
+      - DeviceName: /dev/xvda
+        Ebs: 
+          VolumeType: gp2
+          DeleteOnTermination: true
+          VolumeSize: 20
+          Encrypted: true
+      IamInstanceProfile: !Ref pEc2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-BastionServer
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo su -
+          yum install -y wget
+          amazon-linux-extras install -y postgresql13
+          cd /tmp
+          wget https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-x86_64.zip
+          unzip aws-sam-cli-linux-x86_64.zip -d sam-installation
+          sudo ./sam-installation/install
+          sudo su - ec2-user
+          cd ~ec2-user
+          aws s3 cp ${pS3CodeLocation} .
+          unzip aws-postgresql-interval-partitioning-pg_cron.zip
+          sudo chown -R ec2-user:ec2-user aws-postgresql-interval-partitioning-pg_cron
+          cd aws-postgresql-interval-partitioning-pg_cron/send-cron-job-failures/sql
+          v_secret_id=`echo ${rAuroraPostgresSecret} | rev | cut -f 1 -d':' | cut -f 2- -d '-' | rev`
+          export PGPASSWORD=`aws secretsmanager get-secret-value --secret-id $v_secret_id --version-stage AWSCURRENT --region ${AWS::Region} --output table | grep "SecretString" | cut -f 3 -d ":" | cut -f 1 -d "," | sed "s/\"//g"`
+          export PGUsername=${pPGDBAdminUser}
+          export PGDBName=${pPGDBName}
+          export PGDBPort=${pPGDBPort}
+          export PGEndpoint=${rAuroraPGCluster.Endpoint.Address}
+          psql -h $PGEndpoint -p $PGDBPort -U $PGUsername -dpostgres -f exec_pg_queries_1.sql
+          psql -h $PGEndpoint -p $PGDBPort -U $PGUsername -d${pPGDBName} -f exec_pg_queries_2.sql
+          
+  rAuroraPostgresSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: 'This is the secret for Aurora instance'
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${pPGDBAdminUser}"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\:,{}'
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Aurora Postgres Secret
+
+  rMonitoringIAMRole: 
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "monitoring.rds.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-RDS Monitoring Role
+
+  rDBClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Sub "Aurora PG Cluster Parameter Group for  Database - ${pPGDBName}"
+      Family: !FindInMap [mDBFamily, !Ref pPGDBEngineVersion, "family"]
+      Parameters:
+        rds.force_ssl: 1
+        shared_preload_libraries: pg_stat_statements,pg_cron
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Aurora Cluster Parameter Group
+
+  rDBParamGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub "Aurora PG Database Instance Parameter Group for Database - ${pPGDBName}"
+      Family: !FindInMap [mDBFamily, !Ref pPGDBEngineVersion, "family"]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Aurora DB Parameter Group
+
+  rAuroraPGCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: !Ref pPGDBEngineVersion
+      DatabaseName: !Ref pPGDBName
+      DBClusterIdentifier: !Sub ${pPGDBName}-AuroraPGCluster
+      Port: !Ref pPGDBPort
+      MasterUsername: !Sub '{{resolve:secretsmanager:${rAuroraPostgresSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${rAuroraPostgresSecret}:SecretString:password}}' 
+      DBSubnetGroupName: !Ref rDBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref rDBSecurityGroup
+      BackupRetentionPeriod: !Ref pPGDBBackupRetention
+      DBClusterParameterGroupName: !Ref rDBClusterParameterGroup
+      StorageEncrypted:  true
+      EnableIAMDatabaseAuthentication: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Aurora PG Cluster
+
+  rAuroraPGInstance1:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass:
+        Ref: pPGDBInstanceClass
+      DBClusterIdentifier: !Ref rAuroraPGCluster  
+      Engine: aurora-postgresql
+      EngineVersion: !Ref pPGDBEngineVersion
+      DBParameterGroupName:
+        Ref: rDBParamGroup
+      MonitoringInterval: 1
+      MonitoringRoleArn: !GetAtt rMonitoringIAMRole.Arn
+      AutoMinorVersionUpgrade: true
+      DBSubnetGroupName: !Ref rDBSubnetGroup
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Aurora PG Instance
+
+  rAuroraPostgresSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref rAuroraPostgresSecret
+      TargetId: !Ref rAuroraPGCluster
+      TargetType: AWS::RDS::DBCluster
+
+Outputs:
+  oVPC:
+    Description: A reference to the created VPC
+    Value: !Ref rVPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCID"
+
+  oPublicBastionSubnet:
+    Description: Public Subnet for Bastion Server
+    Value: !Ref rPublicBastionSubnet1
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicBastionSubnet"
+
+  oPrivateDBSubnet1:
+    Description: Private Subnet for DB Server in 1st Availability Zone
+    Value: !Ref rPrivateDBSubnet1
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateDBSubnet1"
+
+  oPrivateDBSubnet2:
+    Description: Private Subnet for DB Server in 1st Availability Zone
+    Value: !Ref rPrivateDBSubnet2
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateDBSubnet2"
+
+  oBastionSecurityGroup:
+    Description: Security group to control access to the Bastion Server
+    Value: !Ref rBastionSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-BastionSecurityGroup"
+
+  oDBSecurityGroup:
+    Description: Security group to control access to the DB Server
+    Value: !Ref rDBSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-DBSecurityGroup"
+
+  oVPCEndpointSecurityGroup:
+    Description: Security group to control access to the VPC Endpoint
+    Value: !Ref rVPCEndpointSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCEndpointSecurityGroup"
+
+  oDBSubnetGroup:
+    Description: DB Subnet group for RDS Instances
+    Value: !Ref rDBSubnetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-DBSubnetGroup"
+
+  oPublicRouteTable:
+    Description: Public Route Table
+    Value: !Ref rPublicRouteTable
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicRouteTable"
+
+  oPrivateRouteTable1:
+    Description: Private Route Table
+    Value: !Ref rPrivateRouteTable1
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateRouteTable1"
+
+  oBastionServer:
+    Description: Bastion Server
+    Value: !Ref rBastionServer
+    Export:
+      Name: !Sub "${AWS::StackName}-BastionServer"
+
+  oAuroraPostgresSecret:
+    Description: Secrets for Aurora Postgres Instance
+    Value: !Ref rAuroraPostgresSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-AuroraPostgresSecret"
+
+  oAuroraPGCluster:
+    Description: Aurora Postgres Cluster
+    Value: !Ref rAuroraPGCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-AuroraPGCluster"
+
+  oAuroraPGInstance1:
+    Description: Aurora Postgres Instance1
+    Value: !Ref rAuroraPGInstance1
+    Export:
+      Name: !Sub "${AWS::StackName}-AuroraPGInstance1"

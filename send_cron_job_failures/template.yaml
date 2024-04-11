@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: This template deploys a Lambda function that is triggered by the PostgreSQL procedure when there are failures in PostgreSQL Partition maintenance job. The Lambda function sends the notification using SNS.
+
+Parameters:
+  pNotificationEmail:
+    Type: String
+    AllowedPattern: "^[\\w-\\+]+(\\.[\\w]+)*@[\\w-]+(\\.[\\w]+)*(\\.[a-z]{2,})$"
+    Default: example@example.com
+    Description: Email address to alert of any security control violations 
+
+  pVpc:
+    Type: String
+    Description: VPC Id where the Lambda Function will be deployed
+    Default: vpc-xxxxxx123
+
+  pPrivateSubnet1:
+    Type: String
+    Description: Private Subnet Id 1 to create the Lambda Function
+    Default: subnet-xxxxxx123
+
+  pPrivateSubnet2:
+    Type: String
+    Description: Private Subnet Id 2 to create the Lambda Function
+    Default: subnet-xxxxxx456
+
+Resources:
+  rSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows connectivity between Lambda and Endpoints
+      VpcId: !Ref pVpc
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+          Description: Allow all outgoing connections
+
+  rLambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda function
+      VpcId: !Ref pVpc
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+          Description: Allow all outgoing connections
+
+  rSecurityGroupingress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref rSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref rSecurityGroup
+      Description: 'Self Reference'
+
+# Access is restriced to SNS Topic.
+  rLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-LambdaPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: snsaccess
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref rNotifyDBA
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  rRdsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-RdsLambdaPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: rdslambdaaccess
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt rLambda.Arn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - rds.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  rLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: main.lambda_handler
+      Runtime: python3.12
+      MemorySize: 128
+      Role: !GetAtt 'rLambdaRole.Arn'
+      Timeout: 60
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref rLambdaSecurityGroup
+        SubnetIds:
+          - !Ref pPrivateSubnet1
+          - !Ref pPrivateSubnet2
+
+  rNotifyDBA:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref pNotificationEmail
+          Protocol: email
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-SnsTopic
+
+  rSnsEndPoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      ServiceName: !Join
+        - ''
+        - - com.amazonaws.
+          - !Ref 'AWS::Region'
+          - .sns
+      SubnetIds:
+        - !Ref pPrivateSubnet1
+        - !Ref pPrivateSubnet2
+      SecurityGroupIds:
+        - !Ref rSecurityGroup
+      VpcEndpointType: Interface
+      VpcId: !Ref pVpc
+
+  rLambdaEndPoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      ServiceName: !Join
+        - ''
+        - - com.amazonaws.
+          - !Ref 'AWS::Region'
+          - .lambda
+      SubnetIds:
+        - !Ref pPrivateSubnet1
+        - !Ref pPrivateSubnet2
+      SecurityGroupIds:
+        - !Ref rLambdaSecurityGroup
+      VpcEndpointType: Interface
+      VpcId: !Ref pVpc
+
